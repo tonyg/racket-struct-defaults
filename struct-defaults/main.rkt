@@ -164,11 +164,16 @@
              (define ctor-proc
                (procedure-rename
                 #,(if have-rest-id?
-                      (let ((remaining-ids (filter-not (id=? #'rest-id) accessor-ids)))
+                      (let ((remaining-ids (filter-not (id=? #'rest-id) accessor-ids))
+                            ;; v TODO: If I say #'rest-id for
+                            ;; rest-accessor below, it doesn't work
+                            ;; properly. Why not? See test in
+                            ;; test-provide.rkt.
+                            (rest-accessor (findf (id=? #'rest-id) accessor-ids)))
                         #`(lambda (#,@(filter-not lookup-default remaining-ids)
                                    #,@(append-map compute-binder
                                                   (filter lookup-default remaining-ids))
-                                   . rest-id)
+                                   . #,rest-accessor)
                             (#,ctor-id #,@accessor-ids)))
                       #`(lambda (#,@(filter-not lookup-default accessor-ids)
                                  #,@(append-map compute-binder (filter lookup-default accessor-ids)))
