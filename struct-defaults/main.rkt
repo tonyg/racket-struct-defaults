@@ -22,14 +22,10 @@
                 (format "Cannot retrieve struct-info information for identifier ~v"
                         struct-type-id)))))))
 
-  (define (find-keyworded-pattern ctor-id sought-kw pats mandatory?)
+  (define (find-keyworded-pattern ctor-id sought-kw pats)
     (let loop ((pats pats))
       (syntax-case pats ()
-        [()
-         (if mandatory?
-             (raise-syntax-error ctor-id
-                                 (format "Missing mandatory keyword pattern: ~v" sought-kw))
-             #'_)]
+        [() #'_]
         [(kw pat rest ...)
          (keyword? (syntax->datum #'kw))
          (if (equal? (syntax->datum #'kw) sought-kw)
@@ -143,7 +139,7 @@
                                         1)
                                    #,pats-stx)]
              [(and entry (cadr entry))
-              #`(find-keyworded-pattern 'new-ctor '#,(cadr entry) #,pats-stx #,(null? (cddr entry)))]
+              #`(find-keyworded-pattern 'new-ctor '#,(cadr entry) #,pats-stx)]
              [else
               #`(find-positional-pattern 'new-ctor
                                          '#,accessor-id
