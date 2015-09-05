@@ -8,7 +8,7 @@
 (require racket/provide-syntax)
 (require (for-syntax racket/base
                      racket/struct-info
-                     (only-in racket/list append-map filter-not)))
+                     (only-in racket/list append-map filter-not drop remf)))
 
 (begin-for-syntax
   (define (info struct-type-id)
@@ -38,30 +38,37 @@
         [(pat rest ...)
          (loop #'(rest ...))])))
 
-  (define (find-positional-pattern ctor-id name index pats mandatory?)
-    (let loop ((index index) (pats pats))
+  (define (extract-positional-patterns ctor-id pats)
+    (let loop ((pats pats))
       (syntax-case pats ()
-        [()
-         (if mandatory?
-             (raise-syntax-error ctor-id
-                                 (format "Missing pattern for field ~a" name))
-             #'_)]
+        [() '()]
         [(kw pat rest ...)
          (keyword? (syntax->datum #'kw))
-         (loop index #'(rest ...))]
+         (loop #'(rest ...))]
         [(pat rest ...)
-         (cond
-           [(keyword? (syntax->datum #'kw))
-            (raise-syntax-error ctor-id "Unexpected keyword")]
-           [(zero? index)
-            #'pat]
-           [else
-            (loop (- index 1) #'(rest ...))])]))))
+         (if (keyword? (syntax->datum #'kw))
+             (raise-syntax-error ctor-id "Unexpected keyword")
+             (cons #'pat (loop #'(rest ...))))])))
+
+  (define (find-positional-pattern ctor-id name index pats mandatory?)
+    (define positionals (extract-positional-patterns ctor-id pats))
+    (cond
+      [(> (length positionals) index) (list-ref positionals index)]
+      [(not mandatory?) #'_]
+      [else (raise-syntax-error ctor-id (format "Missing pattern for field ~a" name))]))
+
+  (define (find-rest-pattern ctor-id positional-count pats)
+    (define positionals (extract-positional-patterns ctor-id pats))
+    (if (>= (length positionals) positional-count)
+        #`(list #,@(drop positionals positional-count))
+        (raise-syntax-error ctor-id "Too few positional arguments"))))
 
 (define-syntax define-struct-defaults
   (lambda (stx)
     (syntax-case stx ()
       [(_ new-ctor struct-type-id (spec ...))
+       #'(define-struct-defaults new-ctor struct-type-id (spec ...) #:rest #f)]
+      [(_ new-ctor struct-type-id (spec ...) #:rest rest-id)
        (let ()
 
          (define defaults
@@ -80,8 +87,10 @@
                      (identifier? #'accessor))
                 (cons (list #'accessor (syntax->datum #'kw)) (walk #'(rest ...)))])))
 
+         (define ((id=? i) j) (free-identifier=? i j))
+
          (define (lookup-default accessor-id)
-           (assf (lambda (i) (free-identifier=? i accessor-id)) defaults))
+           (assf (id=? accessor-id) defaults))
 
          (define (compute-binder accessor-id)
            (define entry (lookup-default accessor-id))
@@ -95,12 +104,28 @@
            (info #'struct-type-id))
          (define accessor-ids (reverse accessor-ids-rev))
 
+         (define positional-default-ids
+           (filter (lambda (i)
+                     (define entry (lookup-default i))
+                     (and entry (not (cadr entry))))
+                   accessor-ids))
+
+         (define have-rest-id? (syntax->datum #'rest-id))
+
+         (when have-rest-id?
+           (when (not (null? positional-default-ids))
+             (raise-syntax-error #f "Cannot use positional defaults with rest argument" stx))
+           (when (lookup-default #'rest-id)
+             (raise-syntax-error #f "Cannot have default value for rest argument" stx))
+           (when (not (memf (id=? #'rest-id) accessor-ids))
+             (raise-syntax-error #f "Rest identifier not a field of given struct type" stx)))
+
          (define positional-accessor-ids
-           (append (filter-not lookup-default accessor-ids)
-                   (filter (lambda (i)
-                             (define entry (lookup-default i))
-                             (and entry (not (cadr entry))))
-                           accessor-ids)))
+           (let ((ids (append (filter-not lookup-default accessor-ids)
+                              positional-default-ids)))
+             (if have-rest-id?
+                 (remf (id=? #'rest-id) ids)
+                 ids)))
 
          (define (positional-index-of accessor-id)
            (let walk ((index 0) (ids positional-accessor-ids))
@@ -110,31 +135,44 @@
 
          (define (extract-pattern accessor-id pats-stx)
            (define entry (lookup-default accessor-id))
-           (if (and entry (cadr entry))
-               #`(find-keyworded-pattern 'new-ctor '#,(cadr entry) #,pats-stx #,(null? (cddr entry)))
-               #`(find-positional-pattern 'new-ctor
-                                          '#,accessor-id
-                                          #,(positional-index-of accessor-id)
-                                          #,pats-stx
-                                          #,(not entry))))
+           (cond
+             [(and have-rest-id? (free-identifier=? accessor-id #'rest-id))
+              #`(find-rest-pattern 'new-ctor
+                                   #,(- (length accessor-ids)
+                                        (length defaults)
+                                        1)
+                                   #,pats-stx)]
+             [(and entry (cadr entry))
+              #`(find-keyworded-pattern 'new-ctor '#,(cadr entry) #,pats-stx #,(null? (cddr entry)))]
+             [else
+              #`(find-positional-pattern 'new-ctor
+                                         '#,accessor-id
+                                         #,(positional-index-of accessor-id)
+                                         #,pats-stx
+                                         #,(not entry))]))
 
          (when (and (pair? accessor-ids)
                     (eq? (car accessor-ids) #f))
            (raise-syntax-error #f "Partially-opaque struct types not supported" stx))
 
          (define unknown-defaults
-           (filter (lambda (entry)
-                     (not (memf (lambda (i) (free-identifier=? i (car entry))) accessor-ids)))
-                   defaults))
+           (filter (lambda (entry) (not (memf (id=? (car entry)) accessor-ids))) defaults))
          (when (not (null? unknown-defaults))
            (raise-syntax-error #f (format "Unknown fields: ~v" unknown-defaults)))
 
          #`(begin
              (define ctor-proc
                (procedure-rename
-                (lambda (#,@(filter-not lookup-default accessor-ids)
-                         #,@(append-map compute-binder (filter lookup-default accessor-ids)))
-                  (#,ctor-id #,@accessor-ids))
+                #,(if have-rest-id?
+                      (let ((remaining-ids (filter-not (id=? #'rest-id) accessor-ids)))
+                        #`(lambda (#,@(filter-not lookup-default remaining-ids)
+                                   #,@(append-map compute-binder
+                                                  (filter lookup-default remaining-ids))
+                                   . rest-id)
+                            (#,ctor-id #,@accessor-ids)))
+                      #`(lambda (#,@(filter-not lookup-default accessor-ids)
+                                 #,@(append-map compute-binder (filter lookup-default accessor-ids)))
+                          (#,ctor-id #,@accessor-ids)))
                 'new-ctor))
              (define-match-expander new-ctor
                (lambda (cstx)
@@ -270,4 +308,33 @@
                   [(q15 #:q (? even? v) #:y _) (list 'ok v)]
                   [_ 'fail])
                 (list 'ok 88))
+
+  (struct v q (rest) #:transparent)
+
+  (define-struct-defaults v1 v () #:rest v-rest)
+  (check-both-directions (v1 1 2 3 4 5) (v 1 2 '(3 4 5)))
+  (check-both-directions (v1 1 2) (v 1 2 '()))
+  (check-equal? (match (v 1 2 '(3 4 5)) [(v1 1 2 3 x y) (list x y)]) (list 4 5))
+
+  (define-struct-defaults v2 v (#:q [q-q 'q]) #:rest v-rest)
+  (check-both-directions (v2 1 2 3 4 5) (v 1 'q '(2 3 4 5)))
+  (check-both-directions (v2 #:q 1 2 3 4 5) (v 2 1 '(3 4 5)))
+  (check-both-directions (v2 1 #:q 2 3 4 5) (v 1 2 '(3 4 5)))
+  (check-both-directions (v2 1 2 3 #:q 4 5) (v 1 4 '(2 3 5)))
+
+  (define-struct-defaults v3 v (#:q [q-q 'q]) #:rest x-y)
+  (check-both-directions (v3 1 2 3 4 5) (v '(2 3 4 5) 'q 1))
+  (check-both-directions (v3 #:q 1 2 3 4 5) (v '(3 4 5) 1 2))
+  (check-both-directions (v3 1 #:q 2 3 4 5) (v '(3 4 5) 2 1))
+  (check-both-directions (v3 1 2 3 #:q 4 5) (v '(2 3 5) 4 1))
+
+  (define-struct-defaults v4 v (#:q q-q) #:rest v-rest)
+  (check-both-directions (v4 #:q 1 2 3 4 5) (v 2 1 '(3 4 5)))
+  (check-both-directions (v4 1 #:q 2 3 4 5) (v 1 2 '(3 4 5)))
+  (check-both-directions (v4 1 2 3 #:q 4 5) (v 1 4 '(2 3 5)))
+
+  (define-struct-defaults v5 v (#:q q-q) #:rest x-y)
+  (check-both-directions (v5 #:q 1 2 3 4 5) (v '(3 4 5) 1 2))
+  (check-both-directions (v5 1 #:q 2 3 4 5) (v '(3 4 5) 2 1))
+  (check-both-directions (v5 1 2 3 #:q 4 5) (v '(2 3 5) 4 1))
   )
