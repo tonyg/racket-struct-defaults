@@ -8,7 +8,12 @@
 (require racket/provide-syntax)
 (require (for-syntax racket/base
                      racket/struct-info
-                     (only-in racket/list append-map filter-not drop remf)))
+                     (only-in racket/list
+                              append-map
+                              filter-map
+                              filter-not
+                              drop
+                              remf)))
 
 (begin-for-syntax
   (define (info struct-type-id)
@@ -88,23 +93,27 @@
          (define (lookup-default accessor-id)
            (assf (id=? accessor-id) defaults))
 
-         (define (compute-binder accessor-id)
-           (define entry (lookup-default accessor-id))
+         (define (binders-in-default-order ids)
+           (append-map entry->binder
+                       (filter (lambda (entry) (findf (id=? (car entry)) ids))
+                               defaults)))
+
+         (define (entry->binder entry)
            (if (cadr entry) ;; keyword argument provided
                (if (null? (cddr entry)) ;; no default value provided
-                   (list (cadr entry) accessor-id)
-                   (list (cadr entry) (list accessor-id (caddr entry))))
-               (list (list accessor-id (caddr entry)))))
+                   (list (cadr entry) (car entry))
+                   (list (cadr entry) (list (car entry) (caddr entry))))
+               (list (list (car entry) (caddr entry)))))
 
          (define-values (_type-id ctor-id _pred-id accessor-ids-rev _mutator-ids-rev super-type-id)
            (info #'struct-type-id))
          (define accessor-ids (reverse accessor-ids-rev))
 
          (define positional-default-ids
-           (filter (lambda (i)
-                     (define entry (lookup-default i))
-                     (and entry (not (cadr entry))))
-                   accessor-ids))
+           (filter-map (lambda (entry)
+                         (and (not (cadr entry))
+                              (findf (id=? (car entry)) accessor-ids)))
+                       defaults))
 
          (define have-rest-id? (syntax->datum #'rest-id))
 
@@ -167,12 +176,11 @@
                             ;; test-provide.rkt.
                             (rest-accessor (findf (id=? #'rest-id) accessor-ids)))
                         #`(lambda (#,@(filter-not lookup-default remaining-ids)
-                                   #,@(append-map compute-binder
-                                                  (filter lookup-default remaining-ids))
+                                   #,@(binders-in-default-order remaining-ids)
                                    . #,rest-accessor)
                             (#,ctor-id #,@accessor-ids)))
                       #`(lambda (#,@(filter-not lookup-default accessor-ids)
-                                 #,@(append-map compute-binder (filter lookup-default accessor-ids)))
+                                 #,@(binders-in-default-order accessor-ids))
                           (#,ctor-id #,@accessor-ids)))
                 'new-ctor))
              (define-match-expander new-ctor
@@ -206,10 +214,18 @@
   (struct z x () #:transparent)
   (struct q x (q) #:transparent)
 
-  (define-syntax-rule (check-both-directions fancy plain)
-    (begin
-      (check-equal? fancy plain)
-      (check-equal? (match plain [fancy 'ok] [_ (list 'fail 'fancy 'plain)]) 'ok)))
+  (define-syntax (check-both-directions stx)
+    (syntax-case stx ()
+      [(_ fancy plain)
+       ;; Go round the houses a bit here to preserve line numbers of
+       ;; the actual test cases.
+       (with-syntax ((fwd (syntax/loc stx (check-equal? fancy plain)))
+                     (rev (syntax/loc stx
+                            (check-equal? (match plain
+                                            [fancy 'ok]
+                                            [_ (list 'fail 'fancy 'plain)])
+                                          'ok))))
+         #'(begin fwd rev))]))
 
   (define-struct-defaults x1 x ())
   (check-both-directions (x1 99) (x 99))
@@ -272,8 +288,8 @@
 
   (define-struct-defaults q9 q ([q-q 44] [x-y 33]))
   (check-both-directions (q9) (q 33 44))
-  (check-both-directions (q9 99) (q 99 44))
-  (check-both-directions (q9 99 88) (q 99 88))
+  (check-both-directions (q9 99) (q 33 99))
+  (check-both-directions (q9 99 88) (q 88 99))
 
   (define-struct-defaults q10 q ([x-y 33] #:q [q-q 44]))
   (check-both-directions (q10) (q 33 44))
@@ -304,6 +320,20 @@
   ;; (syntax->datum (expand-once #'(define-struct-defaults q15 q (#:y x-y #:q q-q))))
   (define-struct-defaults q15 q (#:y x-y #:q q-q))
   (check-both-directions (q15 #:y 99 #:q 88) (q 99 88))
+
+  (define-struct-defaults q16 q (#:y [x-y 123] #:q [q-q x-y]))
+  (check-equal? (q16) (q 123 123))
+
+  (define-struct-defaults q17 q (#:y [x-y 123] #:q [q-q (case x-y
+                                                          [(123) 234]
+                                                          [else 345])]))
+  (check-equal? (q17) (q 123 234))
+  (check-equal? (q17 #:y 99) (q 99 345))
+
+  (define-struct-defaults q18 q (#:q [q-q x-y] ;; x-y is the global binding at this point
+                                 #:y [x-y 123]))
+  (check-equal? (q18) (q 123 x-y)) ;; N.B. x-y is a procedure
+  (check-equal? (q18 #:y 99) (q 99 x-y)) ;; N.B. x-y is a procedure
 
   (check-equal? (match (q 99 88)
                   [(q15 #:q (? even? v) #:y _) (list 'ok v)]
