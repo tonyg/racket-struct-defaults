@@ -8,10 +8,13 @@
 (require racket/provide-syntax)
 (require (for-syntax racket/base
                      racket/struct-info
+                     (only-in racket/string
+                              string-prefix?)
                      (only-in racket/list
                               append-map
                               filter-map
                               filter-not
+                              drop-right
                               drop
                               remf)))
 
@@ -27,10 +30,38 @@
                 (format "Cannot retrieve struct-info information for identifier ~v"
                         struct-type-id)))))))
 
-  (define (find-keyworded-pattern ctor-id sought-kw pats)
+  (define (accessors/keywords struct-type-id-stx)
+    (define-values (_super-count mapping)
+      (let loop ((struct-type-id-stx struct-type-id-stx))
+        (if (identifier? struct-type-id-stx)
+            (let ()
+              (define-values (type-id ctor-id _pred-id accessor-ids-rev _mutator-ids-rev super-type-id)
+                (info struct-type-id-stx))
+              (define-values (super-count mapping) (loop super-type-id))
+              (define prefix (format "~a-" (syntax->datum ctor-id)))
+              (values
+               (length accessor-ids-rev)
+               (for/fold [(mapping mapping)]
+                         [(accessor-id (in-list (drop-right accessor-ids-rev super-count)))]
+                 (define accessor-name (symbol->string (syntax->datum accessor-id)))
+                 (if (string-prefix? accessor-name prefix)
+                     (let ((kw (string->keyword (substring accessor-name
+                                                           (string-length prefix)
+                                                           (string-length accessor-name)))))
+                       (if (memf (lambda (e) (eq? (cadr e) kw)) mapping)
+                           mapping
+                           (cons (list accessor-id kw) mapping)))
+                     mapping))))
+            (values 0 '()))))
+    mapping)
+
+  (define (find-keyworded-pattern ctor-id sought-kw pats mandatory?)
     (let loop ((pats pats))
       (syntax-case pats ()
-        [() #'_]
+        [()
+         (if mandatory?
+             (raise-syntax-error ctor-id (format "Missing keyword pattern ~a" sought-kw))
+             #'_)]
         [(kw pat rest ...)
          (keyword? (syntax->datum #'kw))
          (if (equal? (syntax->datum #'kw) sought-kw)
@@ -65,22 +96,28 @@
           [(>= (length positionals) mandatory-count)
            #`(list)]
           [else
-           (raise-syntax-error ctor-id "Too few positional arguments")])))
+           (raise-syntax-error ctor-id "Too few positional arguments")]))
+
+  (define (parse-suffix ctor-id stx rest-id allow-positionals?)
+    (syntax-case stx ()
+      [() (values rest-id allow-positionals?)]
+      [(#:rest r-id more ...) (parse-suffix ctor-id #'(more ...) #'r-id allow-positionals?)]
+      [(#:keywords-only more ...) (parse-suffix ctor-id #'(more ...) rest-id #f)]
+      [_ (raise-syntax-error ctor-id (format "Invalid define-struct-defaults flags: ~v" stx))])))
 
 (define-syntax define-struct-defaults
   (lambda (stx)
     (syntax-case stx ()
-      [(_ new-ctor struct-type-id (spec ...))
-       #'(define-struct-defaults new-ctor struct-type-id (spec ...) #:rest #f)]
-      [(_ new-ctor struct-type-id (spec ...) #:rest rest-id)
-       (let ()
+      [(_ new-ctor struct-type-id (spec ...) suffix ...)
+       (let-values (((rest-id-stx allow-positionals?)
+                     (parse-suffix #'new-ctor #'(suffix ...) #'#f #t)))
 
-         (define defaults
+         (define defaults0
            (let walk ((specs #'(spec ...)))
              (syntax-case specs ()
                [() '()]
                [([accessor value] rest ...)
-                (identifier? #'accessor)
+                (and allow-positionals? (identifier? #'accessor))
                 (cons (list #'accessor #f #'value) (walk #'(rest ...)))]
                [(kw [accessor value] rest ...)
                 (and (keyword? (syntax->datum #'kw))
@@ -89,9 +126,28 @@
                [(kw accessor rest ...)
                 (and (keyword? (syntax->datum #'kw))
                      (identifier? #'accessor))
-                (cons (list #'accessor (syntax->datum #'kw)) (walk #'(rest ...)))])))
+                (cons (list #'accessor (syntax->datum #'kw)) (walk #'(rest ...)))]
+               [_
+                (raise-syntax-error (syntax->datum #'new-ctor)
+                                    (format "Invalid default specifications: ~v" specs))])))
 
          (define ((id=? i) j) (free-identifier=? i j))
+
+         (define-values (_type-id ctor-id _pred-id accessor-ids-rev _mutator-ids-rev super-type-id)
+           (info #'struct-type-id))
+         (define accessor-ids (reverse accessor-ids-rev))
+
+         (define defaults
+           (if allow-positionals?
+               defaults0
+               (let ((accessor-keyword-map (accessors/keywords #'struct-type-id)))
+                 (append defaults0
+                         (filter (lambda (e)
+                                   (define id (car e))
+                                   (define kw (cadr e))
+                                   (and (not (ormap (id=? id) (map car defaults0)))
+                                        (not (ormap (lambda (k) (eq? k kw)) (map cadr defaults0)))))
+                                 accessor-keyword-map)))))
 
          (define (lookup-default accessor-id)
            (assf (id=? accessor-id) defaults))
@@ -108,29 +164,25 @@
                    (list (cadr entry) (list (car entry) (caddr entry))))
                (list (list (car entry) (caddr entry)))))
 
-         (define-values (_type-id ctor-id _pred-id accessor-ids-rev _mutator-ids-rev super-type-id)
-           (info #'struct-type-id))
-         (define accessor-ids (reverse accessor-ids-rev))
-
          (define positional-default-ids
            (filter-map (lambda (entry)
                          (and (not (cadr entry))
                               (findf (id=? (car entry)) accessor-ids)))
                        defaults))
 
-         (define have-rest-id? (syntax->datum #'rest-id))
+         (define have-rest-id? (syntax->datum rest-id-stx))
 
          (when have-rest-id?
-           (when (lookup-default #'rest-id)
+           (when (lookup-default rest-id-stx)
              (raise-syntax-error #f "Cannot have default value for rest argument" stx))
-           (when (not (memf (id=? #'rest-id) accessor-ids))
+           (when (not (memf (id=? rest-id-stx) accessor-ids))
              (raise-syntax-error #f "Rest identifier not a field of given struct type" stx)))
 
          (define positional-accessor-ids
            (let ((ids (append (filter-not lookup-default accessor-ids)
                               positional-default-ids)))
              (if have-rest-id?
-                 (remf (id=? #'rest-id) ids)
+                 (remf (id=? rest-id-stx) ids)
                  ids)))
 
          (define (positional-index-of accessor-id)
@@ -142,21 +194,28 @@
          (define (extract-pattern accessor-id pats-stx)
            (define entry (lookup-default accessor-id))
            (cond
-             [(and have-rest-id? (free-identifier=? accessor-id #'rest-id))
-              #`(find-rest-pattern 'new-ctor
+             [(and have-rest-id? (free-identifier=? accessor-id rest-id-stx))
+              (quasisyntax/loc pats-stx
+                (find-rest-pattern 'new-ctor
                                    #,(- (length accessor-ids)
                                         (length defaults)
                                         1)
                                    #,(length positional-default-ids)
-                                   #,pats-stx)]
+                                   #,pats-stx))]
              [(and entry (cadr entry))
-              #`(find-keyworded-pattern 'new-ctor '#,(cadr entry) #,pats-stx)]
+              (quasisyntax/loc pats-stx
+                (find-keyworded-pattern 'new-ctor
+                                        '#,(cadr entry)
+                                        #,pats-stx
+                                        #,(null? (cddr entry))))]
              [else
-              #`(find-positional-pattern 'new-ctor
+              (quasisyntax/loc pats-stx
+                (find-positional-pattern 'new-ctor
                                          '#,accessor-id
                                          #,(positional-index-of accessor-id)
                                          #,pats-stx
-                                         #,(not entry))]))
+                                         #,(or (not entry)
+                                               (null? (cddr entry)))))]))
 
          (when (and (pair? accessor-ids)
                     (eq? (car accessor-ids) #f))
@@ -171,12 +230,12 @@
              (define ctor-proc
                (procedure-rename
                 #,(if have-rest-id?
-                      (let ((remaining-ids (filter-not (id=? #'rest-id) accessor-ids))
+                      (let ((remaining-ids (filter-not (id=? rest-id-stx) accessor-ids))
                             ;; v TODO: If I say #'rest-id for
                             ;; rest-accessor below, it doesn't work
                             ;; properly. Why not? See test in
                             ;; test-provide.rkt.
-                            (rest-accessor (findf (id=? #'rest-id) accessor-ids)))
+                            (rest-accessor (findf (id=? rest-id-stx) accessor-ids)))
                         #`(lambda (#,@(filter-not lookup-default remaining-ids)
                                    #,@(binders-in-default-order remaining-ids)
                                    . #,rest-accessor)

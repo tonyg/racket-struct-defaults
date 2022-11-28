@@ -7,7 +7,9 @@ constructors and patterns.
 
 ## Macro: `define-struct-defaults`
 
-(`define-struct-defaults` *new-ctor* *struct-type-id* (*spec* ...) «`#:rest` *rest-id*»)
+(`define-struct-defaults` *new-ctor* *struct-type-id* (*spec* ...)  
+  «`#:rest` *rest-id*»  
+  «`#:keywords-only`»)
 
 where
 
@@ -15,6 +17,8 @@ where
  - *struct-type-id* is an identifier that should refer to a `struct` definition
  - *spec* = [*accessor* *value*] | `#:`*kw* [*accessor* *value*] | `#:`*kw* *accessor*
  - *rest-id*, if supplied, names the struct field to receive any supplied rest-arguments
+ - if `#:keywords-only` is present, positional arguments are disallowed and keyword argument
+   names are inferred where not explicitly given
 
 Binds *new-ctor* to a [match
 expander](https://docs.racket-lang.org/reference/match.html#%28part._.Extending_match%29),
@@ -99,6 +103,76 @@ Note that the `#:fictional` keyword argument is mandatory:
 ;    #:fictional #t
 ```
 
+The following form defines a constructor/match-expander `person2` that only accepts keyword
+arguments:
+
+```racket
+(define-struct-defaults person2 person () #:keywords-only)
+```
+
+This can be useful for structs that have a large number of fields. Some REPL interactions:
+
+```racket
+> (person2 #:first-name "Alice"
+           #:last-name "Liddell"
+           #:nickname 'none
+           #:age 170
+           #:fictional? #t
+           #:extra '())
+'#s(person "Alice" "Liddell" none 170 #t ())
+
+> (person2 #:first-name "Alice")
+; application: required keyword argument not supplied
+;   procedure: person2
+;   required keyword: #:age
+; [,bt for context]
+
+> (person2)
+; raise-missing-kw: arity mismatch;
+;  the expected number of arguments does not match the given number
+;   expected: 3
+;   given: 2
+; [,bt for context]
+```
+
+Using `#:keywords-only` with a positional default is not allowed:
+
+```racket
+> (define-struct-defaults person3 person ([person-age 'unknown]) #:keywords-only)
+; person3: Invalid default specifications: #<syntax:main.rkt:116:31
+;   ((person-age (quote unknown)))> [,bt for context]
+```
+
+However, keyword defaults are fine:
+
+```racket
+(define-struct-defaults person4 person (#:age [person-age 'unknown]) #:keywords-only)
+
+> (person4 #:first-name "Alice"
+           #:last-name "Liddell"
+           #:nickname 'none
+           #:fictional? #t
+           #:extra '())
+'#s(person "Alice" "Liddell" none unknown #t ())
+```
+
+And explicitly-given keywords do not have to match the keywords inferred from the accessor
+names:
+
+```racket
+(define-struct-defaults person5 person (#:nick person-nickname
+                                        #:years [person-age 'unknown])
+  #:keywords-only)
+
+> (person5 #:first-name "Alice"
+           #:last-name "Liddell"
+           #:nick "Alice"
+           #:years 170
+           #:fictional? #t
+           #:extra '())
+'#s(person "Alice" "Liddell" "Alice" 170 #t ())
+```
+
 ### Inheritance
 
 ### Errors
@@ -118,3 +192,9 @@ Note that the `#:fictional` keyword argument is mandatory:
 **Partially-opaque struct types not supported**.  
 
 **Unknown fields: —**.  
+
+**Missing keyword pattern —**.  
+
+**Invalid define-struct-defaults flags: —**.  
+
+**Invalid default specifications: —**.  

@@ -40,6 +40,20 @@
 
   (let ()
     (struct person (name age extra) #:prefab)
+    (define-struct-defaults person/defaults person (#:age [person-age 'unknown]) #:keywords-only)
+
+    (check-equal? (person "Alice" 'unknown '()) (person/defaults #:name "Alice" #:extra '()))
+    (check-equal? (person "Alice" 170 '(a b c)) (person/defaults #:name "Alice" #:extra '(a b c) #:age 170))
+    (check-exn #px"arity mismatch" (lambda () (person/defaults)))
+    (check-exn #px"person/defaults: arity mismatch" (lambda () (person/defaults "Alice")))
+    (check-exn #px"required keyword argument not supplied" (lambda () (person/defaults #:name "Alice")))
+    (check-equal? #t (match (person "Alice" 170 '(a b c)) [(person/defaults #:name "Alice" #:extra '(a b c)) #t] [_ #f]))
+    (check-equal? #t (match (person "Alice" 170 '(a b c)) [(person/defaults #:name "Alice" #:extra '(a b c) #:age 170) #t] [_ #f]))
+    (check-equal? #f (match (person "Alice" 170 '(a b c)) [(person/defaults #:name "Alice" #:extra '(a b c) #:age 169) #t] [_ #f]))
+    )
+
+  (let ()
+    (struct person (name age extra) #:prefab)
     (define-struct-defaults person/defaults person ([person-age 'unknown]) #:rest person-extra)
 
     (check-equal? (person "Alice" 'unknown '()) (person/defaults "Alice"))
