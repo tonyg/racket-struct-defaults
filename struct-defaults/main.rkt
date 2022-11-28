@@ -47,7 +47,7 @@
          (keyword? (syntax->datum #'kw))
          (loop #'(rest ...))]
         [(pat rest ...)
-         (if (keyword? (syntax->datum #'kw))
+         (if (keyword? (syntax->datum #'pat))
              (raise-syntax-error ctor-id "Unexpected keyword")
              (cons #'pat (loop #'(rest ...))))])))
 
@@ -58,11 +58,14 @@
       [(not mandatory?) #'_]
       [else (raise-syntax-error ctor-id (format "Missing pattern for field ~a" name))]))
 
-  (define (find-rest-pattern ctor-id positional-count pats)
+  (define (find-rest-pattern ctor-id mandatory-count positional-count pats)
     (define positionals (extract-positional-patterns ctor-id pats))
-    (if (>= (length positionals) positional-count)
-        #`(list #,@(drop positionals positional-count))
-        (raise-syntax-error ctor-id "Too few positional arguments"))))
+    (cond [(>= (length positionals) (+ mandatory-count positional-count))
+           #`(list #,@(drop positionals (+ mandatory-count positional-count)))]
+          [(>= (length positionals) mandatory-count)
+           #`(list)]
+          [else
+           (raise-syntax-error ctor-id "Too few positional arguments")])))
 
 (define-syntax define-struct-defaults
   (lambda (stx)
@@ -118,8 +121,6 @@
          (define have-rest-id? (syntax->datum #'rest-id))
 
          (when have-rest-id?
-           (when (not (null? positional-default-ids))
-             (raise-syntax-error #f "Cannot use positional defaults with rest argument" stx))
            (when (lookup-default #'rest-id)
              (raise-syntax-error #f "Cannot have default value for rest argument" stx))
            (when (not (memf (id=? #'rest-id) accessor-ids))
@@ -146,6 +147,7 @@
                                    #,(- (length accessor-ids)
                                         (length defaults)
                                         1)
+                                   #,(length positional-default-ids)
                                    #,pats-stx)]
              [(and entry (cadr entry))
               #`(find-keyworded-pattern 'new-ctor '#,(cadr entry) #,pats-stx)]
