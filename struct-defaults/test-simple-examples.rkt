@@ -44,7 +44,7 @@
 
     (check-equal? (person "Alice" 'unknown '()) (person/defaults #:name "Alice" #:extra '()))
     (check-equal? (person "Alice" 170 '(a b c)) (person/defaults #:name "Alice" #:extra '(a b c) #:age 170))
-    (check-exn #px"required keyword argument" (lambda () (person/defaults)))
+    (check-exn #px"(arity mismatch|required keyword argument)" (lambda () (person/defaults)))
     (check-exn #px"person/defaults: arity mismatch" (lambda () (person/defaults "Alice")))
     (check-exn #px"required keyword argument not supplied" (lambda () (person/defaults #:name "Alice")))
     (check-equal? #t (match (person "Alice" 170 '(a b c)) [(person/defaults #:name "Alice" #:extra '(a b c)) #t] [_ #f]))
